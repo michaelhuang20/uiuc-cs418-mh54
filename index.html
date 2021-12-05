@@ -32,12 +32,17 @@ uniform mat4 uModelViewMatrix;
 uniform mat3 uNormalMatrix;
 uniform mat4 uProjectionMatrix;
 
-out vec2 vTexCoord;
-out vec3 vNormal;
+out vec3 vVertexPosition;
+out vec3 n,l_1,l_2,v;
 
 void main() {
-  vTexCoord.s = aVertexPosition.x + 0.5;
-  vTexCoord.t = aVertexPosition.y + 0.5;
+  vVertexPosition = aVertexPosition;
+
+  n = normalize(uNormalMatrix*aVertexNormal);
+  l_1 = normalize(uNormalMatrix*vec3(0.0,0.5,-1.0));
+  l_2 = normalize(uNormalMatrix*vec3(0.0,0.5,1.0));
+  vec4 p = uModelViewMatrix*vec4(aVertexPosition, 1.0);
+  v = normalize(-p.xyz);
 
   gl_Position = uProjectionMatrix*uModelViewMatrix*vec4(aVertexPosition, 1.0);
 }
@@ -51,19 +56,116 @@ var fs = `#version 300 es
 
 precision mediump float;
     
-in vec3 vNormal;
-in vec2 vTexCoord;
+in vec3 n,l_1,l_2,v;
+in vec3 vVertexPosition;
 uniform sampler2D uSampler;
 uniform sampler2D uSampler2;
+uniform sampler2D uSampler3;
 
 out vec4 outColor;
-    
-void main() {
-  vec3 illinois = vec3(texture(uSampler, vTexCoord));
-  vec3 stadium = vec3(texture(uSampler2, vTexCoord));
-  vec3 c = 0.5*illinois + 0.5*stadium;
 
-  outColor = vec4(c,1.0);
+// procedural texture mapping
+vec3 checkerboard(vec2 TexCoord) {
+  float s = TexCoord.s;
+  float t = TexCoord.t;
+  bool checker_bool = mod(floor(s*7.0)+floor(t*7.0), 2.0)==0.0;
+  vec3 color;
+  if (checker_bool) {
+    color = vec3(0.0, 0.1, 0.3);
+  } else {
+    color = vec3(1.0, 0.2, 0.0);
+  }
+  return color;
+}
+
+// other lighting model: Cook-Torrance Model
+// Reference:  R. Cook and K. Torrance. "A reflectance model for computer graphics". Computer Graphics (SIGGRAPH '81 Proceedings), Vol. 15, No. 3, July 1981, pp. 301–316.
+// https://inst.eecs.berkeley.edu//~cs283/sp13/lectures/cookpaper.pdf
+vec3 CookTorrance(vec3 n, vec3 l, vec3 v, float roughness, float R0, float c) {
+  float NdotL = max(0.0, dot(n, l));
+  float k;
+  if (NdotL > 0.0) {
+    vec3 H = normalize(v+l);
+    float NdotH = max(0.0, dot(n, H));
+    float NdotH_squared = pow(NdotH, 2.0);
+
+    // Beckmann distribution
+    float m_squared = pow(roughness, 2.0);
+    float D_numer = exp(-(1.0-NdotH_squared)/(m_squared*NdotH_squared));
+    float D_denom = 3.14159265358*m_squared*pow(NdotH_squared, 2.0);
+    float D = D_numer/D_denom;
+
+    // Fresnel factor
+    float VdotH = max(0.0, dot(l, H));
+    float F = R0 + (1.0-R0)*pow(1.0-VdotH, 5.0);
+    
+    // Geometric attenuation term
+    float NdotV = max(0.0, dot(n, v));
+    float g_0 = (2.0*NdotH*NdotV)/VdotH;
+    float g_1 = (2.0*NdotH*NdotL)/VdotH;
+    float G = min(1.0, min(g_0, g_1));
+    
+    k = (D*F*G)/(3.14159265358*NdotV*NdotL);
+  } else {
+    k = 0.0;
+  }
+  return vec3(1.0, 1.0, 1.0) * NdotL * (c + k * (1.0 - c));
+}
+
+void main() {
+  vec3 n_0 = normalize(n);
+  
+  // texture mapping
+  vec2 iTexCoord;
+  iTexCoord.s = -atan(vVertexPosition.z,vVertexPosition.x)/(2.0*3.14159265358);
+  iTexCoord.t = (vVertexPosition.y+0.25)/0.5;
+  vec3 illinois = vec3(texture(uSampler, iTexCoord));
+  vec3 ill_c = illinois;
+
+  //procedural texture mapping
+  vec3 checker_c = checkerboard(iTexCoord);
+
+  // bump mapping
+  vec3 up = vec3(0.0,1.0,0.0);
+  vec3 p_s = normalize(cross(n_0, up));
+  vec3 p_t = normalize(cross(n_0, p_s));
+  vec3 make_gray = 0.03*vec3(0.3, 0.59, 0.11);
+  float gray_0 = (255.0-dot(vec3(texture(uSampler, iTexCoord)), make_gray));
+  float gray_s = (255.0-dot(vec3(texture(uSampler, vec2(iTexCoord.s+(1.0/512.0), iTexCoord.t))), make_gray));
+  float gray_t = (255.0-dot(vec3(texture(uSampler, vec2(iTexCoord.s, iTexCoord.t+(1.0/512.0)))), make_gray));
+  float db_ds = (gray_s - gray_0)/(1.0/512.0);
+  float db_dt = (gray_t - gray_0)/(1.0/512.0);
+  vec3 n = normalize(n_0 - cross(db_ds*n_0, p_t) + cross(db_dt*n_0, p_s));
+
+  // environment mapping
+  vec2 sTexCoord;
+  sTexCoord.s= (n.x+1.0)/2.0;
+  sTexCoord.t= (n.y+1.0)/2.0;
+  vec3 stadium = vec3(texture(uSampler2, sTexCoord));
+  vec3 s_c = stadium;
+  vec3 env_mapping = 0.2*s_c;
+  
+  // ambient lighting  
+  vec3 amb = ill_c+checker_c;
+  vec3 amb_lighting = 0.05*amb;
+
+  // diffuse lighting
+  float theta_1 = max(dot(n, l_1), 0.0);
+  float theta_2 = max(dot(n, l_2), 0.0);
+  vec3 diffuse_color = ill_c+checker_c;
+  vec3 diffuse_light_1 = theta_1*diffuse_color;
+  vec3 diffuse_light_2 = theta_2*diffuse_color;
+  vec3 diffuse_lighting = 0.35*diffuse_light_1+0.35*diffuse_light_2;
+
+  // specular highlighting
+  vec3 r = reflect(-l_1, n);
+  float phi_1 = pow(max(dot(v, r), 0.0), 30.0);
+  vec3 spec_light_1 = phi_1*vec3(1.0,1.0,1.0);
+  vec3 spec_lighting = 0.4*spec_light_1+0.4*CookTorrance(n, l_2, v, 0.1, 0.2, 0.1);
+
+  outColor = vec4(diffuse_lighting+spec_lighting+env_mapping+amb_lighting, 1.0);
+
+
 }
 `;
 
@@ -153,7 +255,7 @@ function initwebgl() {
                 gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255]));
 
   var image = new Image();
-  image.src = "illinois512.png";
+  image.src = "illinois512-noborder.png";
 
   image.addEventListener("load", function() {
     gl.bindTexture(gl.TEXTURE_2D, texture);
